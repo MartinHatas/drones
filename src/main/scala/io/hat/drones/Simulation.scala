@@ -2,14 +2,16 @@ package io.hat.drones
 
 import akka.actor.typed.scaladsl.Behaviors
 import akka.actor.typed.{ActorRef, ActorSystem, Behavior}
+import akka.stream.Attributes
 import akka.stream.alpakka.csv.scaladsl.CsvParsing
-import akka.stream.scaladsl.FileIO
-import akka.stream.typed.scaladsl.ActorSink
+import akka.stream.scaladsl.{FileIO, Sink}
 import io.hat.drones.Simulation.Start
 import io.hat.drones.TrafficDrone.DroneProtocol
-import io.hat.drones.TubeMap.{Station, StationsReadComplete, StationsReadFailed, TubeMapProtocol}
+import io.hat.drones.TubeMap.{Station, TubeMapProtocol}
 
 import java.nio.file.Paths
+import scala.concurrent.Await
+import scala.concurrent.duration.DurationInt
 
 object Dispatcher {
 
@@ -36,15 +38,14 @@ object TubeMap {
 
   trait TubeMapProtocol
   case class ScanStationsRequest(lat: Double, lon: Double, radius: Int, replyTo: ActorRef[_]) extends TubeMapProtocol
+  case class Station(name: String, lat: Double, lon: Double)
   case class StationsAroundResponse(stations: Set[Station])
-  case class Station(name: String, lat: Double, lon: Double) extends TubeMapProtocol
-  case object StationsReadComplete extends TubeMapProtocol
-  case class StationsReadFailed(t: Throwable) extends TubeMapProtocol
 
-  def apply(): Behavior[TubeMapProtocol] = {
-
-    Behaviors.receive { (context, msg) =>
-      context.log.info(msg.toString)
+  def apply(stations: Seq[Station]): Behavior[TubeMapProtocol] = {
+    Behaviors.receive[TubeMapProtocol] { (context, msg) =>
+      msg match {
+        case ScanStationsRequest(lat, lon, radius, replyTo) =>
+      }
       Behaviors.same
     }
   }
@@ -63,9 +64,7 @@ object Simulation {
         implicit val system = context.system
         context.log.info(s"Starting simulation $startMessage")
 
-        val tubeMap = context.spawn(TubeMap(), "tube-map")
-
-        FileIO.fromPath(Paths.get(startMessage.mapFileName))
+        val stationsLoading = FileIO.fromPath(Paths.get(startMessage.mapFileName))
           .via(CsvParsing.lineScanner())
           .map(csvRecord =>
             Station(
@@ -73,7 +72,11 @@ object Simulation {
               lat = csvRecord(1).utf8String.toDouble,
               lon = csvRecord(2).utf8String.toDouble)
             )
-          .runWith(ActorSink.actorRef[TubeMapProtocol](tubeMap, StationsReadComplete, StationsReadFailed))
+          .log("Tube station registered").addAttributes(Attributes.logLevels(onElement = Attributes.LogLevels.Info))
+          .runWith(Sink.seq)
+
+        val stations = Await.result(stationsLoading, 5 seconds)
+        val tubeMap = context.spawn(TubeMap(stations), "tube-map")
 
         val drones = startMessage.dronesIds
           .map(droneId => (droneId -> context.spawn(TrafficDrone(droneId, tubeMap), s"drone-$droneId")))
