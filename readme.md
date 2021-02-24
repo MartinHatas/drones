@@ -14,3 +14,10 @@ that a handler of an actor will be called by at most one thread at the same time
 thread safety like synchronizations, locks or atomic or volatile objects.
 
 All messages exchanged between actors are serializable and immutable.
+
+
+## Run
+Run program with SBT from project root
+```bash
+sbt run
+```
