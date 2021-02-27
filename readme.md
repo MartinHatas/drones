@@ -15,6 +15,12 @@ thread safety like synchronizations, locks or atomic or volatile objects.
 
 All messages exchanged between actors are serializable and immutable.
 
+## Actors
+There are three actor types
+* **Dispatcher** - Loads instructions for drones. Sends instructions to drones. Process and store replies from drones.
+* **Drone** - Go to requested location. Uses TubeMap actor to get tube stations around. Check traffic conditions and
+  compute own speed.
+* **TubeMap** - Holds tube station map. Compute and reply with set of tube stations around given coordinates in given radius.
 
 ## Run
 Run program with SBT from project root
