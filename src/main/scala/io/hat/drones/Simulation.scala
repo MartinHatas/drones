@@ -4,9 +4,9 @@ import akka.actor.typed.scaladsl.Behaviors
 import akka.actor.typed.{ActorRef, ActorSystem, Behavior}
 import akka.stream.alpakka.csv.scaladsl.CsvParsing
 import akka.stream.scaladsl.{FileIO, Sink}
-import akka.util.ByteString
+import akka.util.{ByteString, Timeout}
 import io.hat.drones.Simulation.Start
-import io.hat.drones.TrafficDrone.DroneProtocol
+import io.hat.drones.TrafficDrone.{DroneProtocol, GoToPosition, StationsInRadiusResponse}
 import io.hat.drones.TubeMap.{Station, TubeMapProtocol}
 
 import java.nio.file.Paths
@@ -19,6 +19,12 @@ import scala.util.{Success, Try}
 object Dispatcher {
 
   trait DispatcherProtocol
+  case class Report(droneId: String, time: LocalDateTime, speed: Double, trafficConditions: TrafficConditions)
+
+  sealed trait TrafficConditions
+  case object Heavy extends TrafficConditions
+  case object Moderate extends TrafficConditions
+  case object Light extends TrafficConditions
 
   case class SimulationEvent(time: LocalDateTime, droneId: String, lat: Double, lon: Double)
   object SimulationEvent {
@@ -46,6 +52,10 @@ object Dispatcher {
 
     context.log.info(s"Loaded [${simulationEvents.size}] instructions for drones [${drones.keySet.mkString(",")}].")
 
+    simulationEvents.foreach { event =>
+      drones(event.droneId) ! GoToPosition(event.lat, event.lon, event.time)
+    }
+
     Behaviors.receive { (context, message) =>
 
       Behaviors.same
@@ -56,10 +66,32 @@ object Dispatcher {
 
 object TrafficDrone {
 
+  val ScanRadiusMeters = 250
+
   trait DroneProtocol
+  case class GoToPosition(lat: Double, lon: Double, time: LocalDateTime) extends DroneProtocol
+  case class StationsInRadiusResponse(stations: Set[Station]) extends DroneProtocol
+
+  case class DroneState(lat: Double, lon: Double, time: LocalDateTime)
 
   def apply(droneId: String, map: ActorRef[TubeMapProtocol]): Behavior[DroneProtocol] = {
+
+    var state: Option[DroneState] = None
+
     Behaviors.receive { (context, message) =>
+
+      implicit val ac = context.system.scheduler
+      implicit val timeout: Timeout = 3 seconds
+
+      message match {
+        case GoToPosition(lat, lon, time) =>
+
+//          map ? ScanStationsRequest(lat, lon , ScanRadiusMeters, context.self)
+
+          state = Some(DroneState(lat, lon, time))
+
+      }
+
       Behaviors.same
     }
   }
@@ -72,9 +104,8 @@ object TubeMap {
   val LonMax = 180
 
   trait TubeMapProtocol
-  case class ScanStationsRequest(lat: Double, lon: Double, radiusMeters: Int, replyTo: ActorRef[StationsInRadiusResponse]) extends TubeMapProtocol
+  case class ScanStationsRequest(lat: Double, lon: Double, radiusMeters: Int, replyTo: ActorRef[DroneProtocol]) extends TubeMapProtocol
   case class Station(name: String, lat: Double, lon: Double)
-  case class StationsInRadiusResponse(stations: Set[Station])
 
   def apply(stations: Set[Station]): Behavior[TubeMapProtocol] = {
     Behaviors.receiveMessagePartial[TubeMapProtocol] {
