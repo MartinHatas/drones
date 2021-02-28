@@ -4,27 +4,33 @@ import akka.actor.typed.scaladsl.Behaviors
 import akka.actor.typed.{ActorRef, ActorSystem, Behavior}
 import akka.stream.alpakka.csv.scaladsl.CsvParsing
 import akka.stream.scaladsl.{FileIO, Sink}
-import akka.util.{ByteString, Timeout}
+import akka.util.ByteString
+import io.hat.drones.Dispatcher.TrafficConditions.conditions
+import io.hat.drones.Dispatcher.{DispatcherProtocol, Report}
 import io.hat.drones.Simulation.Start
-import io.hat.drones.TrafficDrone.{DroneProtocol, GoToPosition, StationsInRadiusResponse}
-import io.hat.drones.TubeMap.{Station, TubeMapProtocol}
+import io.hat.drones.TrafficDrone.{DroneProtocol, GoToPosition}
+import io.hat.drones.TubeMap.{EarthRadiusMeters, LatMax, LonMax, Station}
 
 import java.nio.file.Paths
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.{Await, Future}
-import scala.util.{Success, Try}
+import scala.util.{Random, Success, Try}
 
 object Dispatcher {
 
   trait DispatcherProtocol
-  case class Report(droneId: String, time: LocalDateTime, speed: Double, trafficConditions: TrafficConditions)
+  case class Report(station: Station, droneId: String, time: LocalDateTime, speed: Double, trafficConditions: TrafficConditions) extends DispatcherProtocol
 
   sealed trait TrafficConditions
   case object Heavy extends TrafficConditions
   case object Moderate extends TrafficConditions
   case object Light extends TrafficConditions
+
+  object TrafficConditions {
+    val conditions: Array[TrafficConditions] = Array(Heavy, Moderate, Light)
+  }
 
   case class SimulationEvent(time: LocalDateTime, droneId: String, lat: Double, lon: Double)
   object SimulationEvent {
@@ -53,10 +59,13 @@ object Dispatcher {
     context.log.info(s"Loaded [${simulationEvents.size}] instructions for drones [${drones.keySet.mkString(",")}].")
 
     simulationEvents.foreach { event =>
-      drones(event.droneId) ! GoToPosition(event.lat, event.lon, event.time)
+      drones(event.droneId) ! GoToPosition(event.lat, event.lon, event.time, context.self)
     }
 
     Behaviors.receive { (context, message) =>
+      message match {
+        case r: Report => context.log.info(s"Received traffic report [$r]")
+      }
 
       Behaviors.same
     }
@@ -66,27 +75,32 @@ object Dispatcher {
 
 object TrafficDrone {
 
-  val ScanRadiusMeters = 250
+  val ScanRadiusMeters = 350
 
   trait DroneProtocol
-  case class GoToPosition(lat: Double, lon: Double, time: LocalDateTime) extends DroneProtocol
-  case class StationsInRadiusResponse(stations: Set[Station]) extends DroneProtocol
-
+  case class GoToPosition(lat: Double, lon: Double, time: LocalDateTime, replyTo: ActorRef[DispatcherProtocol]) extends DroneProtocol
   case class DroneState(lat: Double, lon: Double, time: LocalDateTime)
 
-  def apply(droneId: String, map: ActorRef[TubeMapProtocol]): Behavior[DroneProtocol] = {
+  def apply(droneId: String, tubeMap: TubeMap): Behavior[DroneProtocol] = {
 
     var state: Option[DroneState] = None
 
     Behaviors.receive { (context, message) =>
 
-      implicit val ac = context.system.scheduler
-      implicit val timeout: Timeout = 3 seconds
+      def randomTrafficCondition = conditions(Random.nextInt(conditions.length))
 
       message match {
-        case GoToPosition(lat, lon, time) =>
+        case GoToPosition(lat, lon, time, dispatcher) =>
 
-//          map ? ScanStationsRequest(lat, lon , ScanRadiusMeters, context.self)
+          val speed = state match {
+            case Some(DroneState(lat, lon, _)) => 20
+            case None => 0d
+          }
+
+          tubeMap
+            .getStationsInRadius(lat, lon, ScanRadiusMeters)
+            .map(station => Report(station, droneId, time, speed, randomTrafficCondition))
+            .foreach(dispatcher ! _)
 
           state = Some(DroneState(lat, lon, time))
 
@@ -94,6 +108,36 @@ object TrafficDrone {
 
       Behaviors.same
     }
+  }
+
+}
+
+
+class TubeMap(stations: Set[Station]) {
+
+  def getStationsInRadius(lat: Double, lon: Double, radiusMeters: Int): Set[Station] = {
+    if(positive(radiusMeters) && validLat(lat) && validLon(lon))
+      stations.filterNot(station => radiusMeters <= haversineDistance(lat, lon, station))
+    else
+      Set()
+  }
+
+  private def validLat(lat: Double) = -LatMax <= lat && lat <= LatMax
+  private def validLon(lon: Double) = -LonMax <= lon && lon <= LonMax
+  private def positive(radius: Int) = radius >= 0
+
+  private def haversineDistance(droneLat: Double, droneLon: Double, station: Station): Double = {
+    val deltaLat = math.toRadians(station.lat - droneLat)
+    val deltaLon = math.toRadians(station.lon - droneLon)
+    val droneLatRad = math.toRadians(droneLat)
+    val stationLatRad = math.toRadians(station.lat)
+
+    val a = math.pow(math.sin(deltaLat / 2), 2) +
+      math.pow(math.sin(deltaLon / 2), 2) * math.cos(droneLatRad) * math.cos(stationLatRad)
+    val c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    val distanceMeters = EarthRadiusMeters * c
+    distanceMeters
   }
 }
 
@@ -103,39 +147,7 @@ object TubeMap {
   val LatMax = 90
   val LonMax = 180
 
-  trait TubeMapProtocol
-  case class ScanStationsRequest(lat: Double, lon: Double, radiusMeters: Int, replyTo: ActorRef[DroneProtocol]) extends TubeMapProtocol
   case class Station(name: String, lat: Double, lon: Double)
-
-  def apply(stations: Set[Station]): Behavior[TubeMapProtocol] = {
-    Behaviors.receiveMessagePartial[TubeMapProtocol] {
-      case ScanStationsRequest(lat, lon, radius, replyTo) if positive(radius) && validLat(lat) && validLon(lon) =>
-        val stationsInRadius = stations.filterNot(station => radius <= haversineDistance(lat, lon, station))
-        replyTo ! StationsInRadiusResponse(stationsInRadius)
-        Behaviors.same
-      case ScanStationsRequest(_, _, _, replyTo) => replyTo ! StationsInRadiusResponse(Set())
-        Behaviors.same
-    }
-  }
-
-  def validLat(lat: Double) = -LatMax <= lat && lat <= LatMax
-  def validLon(lon: Double) = -LonMax <= lon && lon <= LonMax
-  def positive(radius: Int) = radius >= 0
-
-  def haversineDistance(droneLat: Double, droneLon: Double, station: Station): Double = {
-    val deltaLat = math.toRadians(station.lat - droneLat)
-    val deltaLon = math.toRadians(station.lon - droneLon)
-    val droneLatRad = math.toRadians(droneLat)
-    val stationLatRad = math.toRadians(station.lat)
-
-    val a = math.pow(math.sin(deltaLat / 2), 2) +
-        math.pow(math.sin(deltaLon / 2), 2) * math.cos(droneLatRad) * math.cos(stationLatRad)
-    val c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-    val distanceMeters = EarthRadiusMeters * c
-    distanceMeters
-  }
-
 }
 
 object Simulation {
@@ -156,7 +168,7 @@ object Simulation {
 
         val stationsLoading = CsvLoader.loadData(startMessage.mapFileName, stationMapper)
         val stations = Await.result(stationsLoading, 5 seconds)
-        val tubeMap = context.spawn(TubeMap(stations.toSet), "tube-map")
+        val tubeMap = new TubeMap(stations.toSet)
 
         val drones = startMessage.dronesIds
           .map(droneId => (droneId -> context.spawn(TrafficDrone(droneId, tubeMap), s"drone-$droneId")))
