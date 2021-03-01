@@ -14,6 +14,7 @@ import io.hat.drones.TubeMap.{EarthRadiusMeters, LatMax, LonMax, Station}
 import java.nio.file.Paths
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.{Await, Future}
 import scala.util.{Random, Success, Try}
@@ -90,19 +91,21 @@ object TrafficDrone {
       def randomTrafficCondition = conditions(Random.nextInt(conditions.length))
 
       message match {
-        case GoToPosition(lat, lon, time, dispatcher) =>
-
-          val speed = state match {
-            case Some(DroneState(lat, lon, _)) => 20
+        case GoToPosition(newLat, newLon, newTime, dispatcher) =>
+          val speedKmH = state match {
+            case Some(DroneState(previousLat, previousLon, previousTime)) =>
+              val distanceKm = tubeMap.haversineDistance(previousLat, previousLon, newLat, newLon) / 1000
+              val timeHours = previousTime.until(newTime, ChronoUnit.SECONDS) / (60d * 60d)
+              distanceKm / timeHours
             case None => 0d
           }
 
           tubeMap
-            .getStationsInRadius(lat, lon, ScanRadiusMeters)
-            .map(station => Report(station, droneId, time, speed, randomTrafficCondition))
+            .getStationsInRadius(newLat, newLon, ScanRadiusMeters)
+            .map(station => Report(station, droneId, newTime, speedKmH, randomTrafficCondition))
             .foreach(dispatcher ! _)
 
-          state = Some(DroneState(lat, lon, time))
+          state = Some(DroneState(newLat, newLon, newTime))
 
       }
 
@@ -117,7 +120,7 @@ class TubeMap(stations: Set[Station]) {
 
   def getStationsInRadius(lat: Double, lon: Double, radiusMeters: Int): Set[Station] = {
     if(positive(radiusMeters) && validLat(lat) && validLon(lon))
-      stations.filterNot(station => radiusMeters <= haversineDistance(lat, lon, station))
+      stations.filterNot(station => radiusMeters <= haversineDistance(lat, lon, station.lat, station.lon))
     else
       Set()
   }
@@ -126,11 +129,11 @@ class TubeMap(stations: Set[Station]) {
   private def validLon(lon: Double) = -LonMax <= lon && lon <= LonMax
   private def positive(radius: Int) = radius >= 0
 
-  private def haversineDistance(droneLat: Double, droneLon: Double, station: Station): Double = {
-    val deltaLat = math.toRadians(station.lat - droneLat)
-    val deltaLon = math.toRadians(station.lon - droneLon)
-    val droneLatRad = math.toRadians(droneLat)
-    val stationLatRad = math.toRadians(station.lat)
+  def haversineDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double = {
+    val deltaLat = math.toRadians(lat2 - lat1)
+    val deltaLon = math.toRadians(lon2 - lon1)
+    val droneLatRad = math.toRadians(lat1)
+    val stationLatRad = math.toRadians(lat2)
 
     val a = math.pow(math.sin(deltaLat / 2), 2) +
       math.pow(math.sin(deltaLon / 2), 2) * math.cos(droneLatRad) * math.cos(stationLatRad)
