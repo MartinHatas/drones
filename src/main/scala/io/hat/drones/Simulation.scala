@@ -18,6 +18,7 @@ import java.time.temporal.ChronoUnit
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.{Await, Future}
 import scala.util.{Random, Success, Try}
+import scala.language.postfixOps
 
 object Dispatcher {
 
@@ -105,13 +106,10 @@ object TrafficDrone {
 
           state = Some(DroneState(newLat, newLon, newTime))
       }
-
       Behaviors.same
     }
   }
-
 }
-
 
 class TubeMap(stations: Set[Station]) {
 
