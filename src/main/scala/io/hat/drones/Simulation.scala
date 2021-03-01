@@ -35,9 +35,7 @@ object Dispatcher {
 
   case class SimulationEvent(time: LocalDateTime, droneId: String, lat: Double, lon: Double)
   object SimulationEvent {
-
     val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
-
     val mapper: List[ByteString] => SimulationEvent = {
       line => SimulationEvent(
         droneId = line(0).utf8String,
@@ -106,7 +104,6 @@ object TrafficDrone {
             .foreach(dispatcher ! _)
 
           state = Some(DroneState(newLat, newLon, newTime))
-
       }
 
       Behaviors.same
@@ -145,11 +142,9 @@ class TubeMap(stations: Set[Station]) {
 }
 
 object TubeMap {
-
   val EarthRadiusMeters = 6378137d
   val LatMax = 90
   val LonMax = 180
-
   case class Station(name: String, lat: Double, lon: Double)
 }
 
@@ -185,17 +180,12 @@ object Simulation {
 }
 
 object DronesApp extends App {
-
   implicit val simulation: ActorSystem[Simulation.Start] = ActorSystem(Simulation(), "traffic-drones-system")
-
   simulation ! Start("data/tube.csv", Set("5937", "6043"))
 }
 
-
 object CsvLoader {
-
   import akka.util.ByteString
-
   def loadData[T](fileName: String, mapper: List[ByteString] => T)(implicit ac: ActorSystem[_]): Future[Seq[T]] = {
     FileIO.fromPath(Paths.get(fileName))
       .via(CsvParsing.lineScanner())
@@ -203,5 +193,4 @@ object CsvLoader {
       .collect{ case Success(element) => element }
       .runWith(Sink.seq)
   }
-
 }
